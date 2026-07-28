@@ -7,7 +7,7 @@ import { ConsoleLogger, createStore, WaClient } from 'zapo-js'
 import { createSqliteStore } from '@zapo-js/store-sqlite'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const PORT = process.env.PORT || 3000
+const PORT = process.env.PORT || 3500
 
 // ---------------------------------------------------------------------------
 // Session state exposed to the UI
