@@ -26,6 +26,8 @@ let lastSendReport = null     // ack report of the most recent send (fast mode c
 let reconnectTimer = null     // dedupes reconnect scheduling (logout + closed-handler race)
 let starting = false          // guards against two clients being built at once
 const GROUPS_TTL_MS = 60_000  // refresh group list at most once per minute
+const SEND_BATCH_SIZE = 5        // groups sent in parallel per batch
+const SEND_BATCH_DELAY_MS = 100  // pause between batches (0.1s), applies to all modes
 
 // ---------------------------------------------------------------------------
 // zapo-js client
@@ -196,13 +198,13 @@ app.post('/api/send', async (req, res) => {
     const known = new Set(groupsCache.map(g => g.jid))
     const nameOf = new Map(groupsCache.map(g => [g.jid, g.subject]))
 
-    // Fire every send at once — no delays, no batching, fully parallel over the socket.
-    // linkPreview:false avoids a blocking URL-metadata fetch when a message contains a link.
-    // 'client is not connected' means the message never left this machine (socket died or
-    // keepalive reconnect in progress) — safe to retry after reconnect, no duplicate risk.
+    // Retry only on 'client is not connected' — that guarantees the message never left this
+    // machine (socket died / keepalive reconnect in progress), so a retry can't duplicate.
     const RETRYABLE_SEND_ERROR = /not connected/i
     const startedAt = Date.now()
-    const promises = jids.map(async (jid) => {
+
+    // linkPreview:false avoids a blocking URL-metadata fetch when a message contains a link.
+    const sendOne = async (jid) => {
       if (!known.has(jid)) throw new Error('Not available in the current session')
       const t0 = Date.now()
       for (let attempt = 0; ; attempt += 1) {
@@ -215,7 +217,22 @@ app.post('/api/send', async (req, res) => {
           await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 5000))
         }
       }
-    })
+    }
+
+    // Batch system: SEND_BATCH_SIZE groups in parallel per batch, SEND_BATCH_DELAY_MS between
+    // batches. Results are kept in jids order so finalize() maps each back to its group.
+    const runBatched = async () => {
+      const settled = new Array(jids.length)
+      for (let start = 0; start < jids.length; start += SEND_BATCH_SIZE) {
+        const slice = jids.slice(start, start + SEND_BATCH_SIZE)
+        const batch = await Promise.allSettled(slice.map(sendOne))
+        for (let k = 0; k < batch.length; k += 1) settled[start + k] = batch[k]
+        if (start + SEND_BATCH_SIZE < jids.length) {
+          await new Promise(resolve => setTimeout(resolve, SEND_BATCH_DELAY_MS))
+        }
+      }
+      return settled
+    }
 
     const finalize = (settled) => {
       const report = settled.map((r, i) => {
@@ -238,14 +255,14 @@ app.post('/api/send', async (req, res) => {
     }
 
     if (fast) {
-      // ⚡ Fast mode: reply the instant the sends are dispatched — don't wait for server acks.
+      // ⚡ Fast mode: reply instantly, then run the batches in the background.
       lastSendReport = null
-      res.json({ ok: true, fast: true, total: jids.length, ms: Date.now() - startedAt })
-      Promise.allSettled(promises).then(finalize)
+      res.json({ ok: true, fast: true, total: jids.length, batchSize: SEND_BATCH_SIZE, ms: Date.now() - startedAt })
+      runBatched().then(finalize).catch(() => {})
       return
     }
 
-    const settled = await Promise.allSettled(promises)
+    const settled = await runBatched()
     const { sent, failed, total, ms, report } = finalize(settled)
     res.json({ ok: sent > 0, sent, failed, total, ms, report })
   } catch (err) {

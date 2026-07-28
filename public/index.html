@@ -414,11 +414,11 @@ async function sendMessage () {
     const data = await r.json()
     if (!r.ok) throw new Error(data.error)
     if (data.fast) {
-      // dispatched instantly — delivery acks are confirmed in the background
+      // dispatched — batches run on the server; delivery acks are confirmed in the background
       fb.className = 'ok'
-      fb.textContent = '⚡ Dispatched to ' + data.total + ' groups in ' + data.ms + 'ms — confirming…'
+      fb.textContent = '⚡ Sending ' + data.total + ' groups in batches of ' + (data.batchSize || 5) + ' — confirming…'
       $('message-input').value = ''
-      confirmFastSend(15)
+      confirmFastSend(90)
     } else {
       renderReport(data)
       if (!data.failed) $('message-input').value = ''
