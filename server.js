@@ -23,6 +23,8 @@ let client = null
 let groupsCache = []          // last known groups of the session
 let groupsCacheAt = 0
 let lastSendReport = null     // ack report of the most recent send (fast mode confirms via this)
+let reconnectTimer = null     // dedupes reconnect scheduling (logout + closed-handler race)
+let starting = false          // guards against two clients being built at once
 const GROUPS_TTL_MS = 60_000  // refresh group list at most once per minute
 
 // ---------------------------------------------------------------------------
@@ -52,18 +54,21 @@ function buildClient () {
   const c = new WaClient({ store, sessionId: 'default' }, new ConsoleLogger('info'))
 
   c.on('auth_qr', async ({ qr }) => {
+    if (c !== client) return // stale instance replaced by a newer one
     state.status = 'waiting_qr'
     state.qrDataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 320 })
     console.log('[zapo] new QR issued — scan it from the UI')
   })
 
   c.on('auth_paired', ({ credentials }) => {
+    if (c !== client) return
     state.me = credentials.meJid
     state.qrDataUrl = null
     console.log('[zapo] paired as', credentials.meJid)
   })
 
   c.on('connection', async (event) => {
+    if (c !== client) return // stale instance replaced by a newer one
     if (event.status === 'open') {
       state.status = 'connected'
       state.qrDataUrl = null
@@ -75,15 +80,15 @@ function buildClient () {
     } else {
       console.log('[zapo] connection closed:', event.reason, 'logout?', event.isLogout)
       if (event.isLogout) {
+        // device removed (UI logout or unlinked from the phone) — restart pairing for a new QR
         state.status = 'logged_out'
         state.me = null
         groupsCache = []
+        scheduleReconnect(1500)
       } else {
         state.status = 'disconnected'
         // zapo does not auto-reconnect by design — rebuild and reconnect
-        setTimeout(() => startClient().catch(err => {
-          state.lastError = String(err?.message || err)
-        }), 3000)
+        scheduleReconnect(3000)
       }
     }
   })
@@ -91,10 +96,30 @@ function buildClient () {
   return c
 }
 
+// Single entry point for reconnects — deduped so racing callers can't spawn two clients
+function scheduleReconnect (delayMs) {
+  if (reconnectTimer) return
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    startClient().catch(err => {
+      state.status = 'disconnected'
+      state.lastError = String(err?.message || err)
+    })
+  }, delayMs)
+}
+
 async function startClient () {
-  state.status = 'connecting'
-  client = buildClient()
-  await client.connect()
+  if (starting) return
+  starting = true
+  try {
+    state.status = 'connecting'
+    const old = client
+    if (old) { try { await old.disconnect() } catch {} } // make sure a stale socket is dead
+    client = buildClient()
+    await client.connect()
+  } finally {
+    starting = false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -236,16 +261,23 @@ app.get('/api/last-send', (req, res) => {
 // Unlink the device and clear the session
 app.post('/api/logout', async (req, res) => {
   try {
-    if (client) await client.logout()
+    if (client) {
+      try {
+        await client.logout()
+      } catch (err) {
+        // teardown noise is expected: the server kills the stream the moment the device
+        // is removed, so in-flight queries fail with 'client is not connected'
+        console.warn('[zapo] logout finished with teardown noise:', String(err?.message || err))
+      }
+    }
     state.status = 'logged_out'
     state.me = null
     state.qrDataUrl = null
     groupsCache = []
+    lastSendReport = null
     res.json({ ok: true })
-    // start a fresh pairing cycle so a new QR appears
-    setTimeout(() => startClient().catch(err => {
-      state.lastError = String(err?.message || err)
-    }), 1500)
+    // fresh pairing cycle so a new QR appears (deduped with the closed-handler restart)
+    scheduleReconnect(1500)
   } catch (err) {
     res.status(500).json({ error: String(err?.message || err) })
   }
