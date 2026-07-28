@@ -378,7 +378,9 @@ function renderReport (data) {
     const line = document.createElement('div')
     line.className = 'result-line ' + (item.ok ? 'ok' : 'err')
     line.textContent = (item.ok ? '✓ ' : '✗ ') + item.subject +
-      (item.ok ? ' (' + item.ms + 'ms)' : ' — ' + item.error)
+      (item.ok
+        ? ' (' + item.ms + 'ms)' + (item.retried ? ' · retried after reconnect' : '')
+        : ' — ' + item.error)
     results.appendChild(line)
   }
 }

@@ -173,12 +173,23 @@ app.post('/api/send', async (req, res) => {
 
     // Fire every send at once — no delays, no batching, fully parallel over the socket.
     // linkPreview:false avoids a blocking URL-metadata fetch when a message contains a link.
+    // 'client is not connected' means the message never left this machine (socket died or
+    // keepalive reconnect in progress) — safe to retry after reconnect, no duplicate risk.
+    const RETRYABLE_SEND_ERROR = /not connected/i
     const startedAt = Date.now()
     const promises = jids.map(async (jid) => {
       if (!known.has(jid)) throw new Error('Not available in the current session')
       const t0 = Date.now()
-      const result = await client.message.send(jid, { type: 'text', text, linkPreview: false })
-      return { result, ms: Date.now() - t0 }
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const result = await client.message.send(jid, { type: 'text', text, linkPreview: false })
+          return { result, ms: Date.now() - t0, retried: attempt > 0 }
+        } catch (err) {
+          if (attempt >= 3 || !RETRYABLE_SEND_ERROR.test(String(err?.message || err))) throw err
+          // give the keepalive detection (20s) + reconnect a chance, then try again
+          await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 5000))
+        }
+      }
     })
 
     const finalize = (settled) => {
@@ -186,7 +197,7 @@ app.post('/api/send', async (req, res) => {
         const jid = jids[i]
         const subject = nameOf.get(jid) || jid
         return r.status === 'fulfilled'
-          ? { jid, subject, ok: true, ms: r.value.ms }
+          ? { jid, subject, ok: true, ms: r.value.ms, retried: r.value.retried || undefined }
           : { jid, subject, ok: false, error: String(r.reason?.message || r.reason) }
       })
       const sent = report.filter(r => r.ok).length
