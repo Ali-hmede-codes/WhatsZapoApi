@@ -1,0 +1,17 @@
+{
+  "name": "zapo-api",
+  "version": "1.0.0",
+  "description": "WhatsApp group sender built on zapo-js: QR pairing UI + send messages only to groups available in the session",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@zapo-js/store-sqlite": "^1.0.0",
+    "better-sqlite3": "^11.10.0",
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "zapo-js": "1.6.2"
+  }
+}

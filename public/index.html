@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zapo Group Sender</title>
+<style>
+  :root {
+    --bg: #0b141a;
+    --panel: #111b21;
+    --panel-2: #202c33;
+    --accent: #00a884;
+    --accent-dark: #008f72;
+    --text: #e9edef;
+    --muted: #8696a0;
+    --danger: #ea5455;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    background: var(--panel-2);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid rgba(134,150,160,.15);
+  }
+  header h1 { font-size: 18px; font-weight: 600; display: flex; gap: 10px; align-items: center; }
+  header h1 .logo {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: var(--accent);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+  .status-pill {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel);
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.connected { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .dot.waiting { background: #f5a623; }
+  .dot.error { background: var(--danger); }
+
+  main { max-width: 960px; margin: 0 auto; padding: 28px 20px; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid rgba(134,150,160,.12);
+    border-radius: var(--radius);
+    padding: 24px;
+  }
+
+  /* ---- QR screen ---- */
+  #qr-screen { text-align: center; padding: 48px 24px; }
+  #qr-screen h2 { font-weight: 600; margin-bottom: 8px; }
+  #qr-screen p { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  #qr-box {
+    width: 300px; height: 300px;
+    margin: 0 auto 20px;
+    background: #fff;
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  #qr-box img { width: 100%; height: 100%; }
+  .spinner {
+    width: 42px; height: 42px;
+    border: 4px solid rgba(0,168,132,.2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  ol.steps {
+    text-align: left; display: inline-block;
+    color: var(--muted); font-size: 13.5px; line-height: 1.9;
+  }
+
+  /* ---- Main app ---- */
+  #app-screen { display: none; grid-template-columns: 340px 1fr; gap: 20px; }
+  @media (max-width: 800px) { #app-screen { grid-template-columns: 1fr; } }
+
+  .panel-title {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .panel-title h3 { font-size: 15px; font-weight: 600; }
+  .icon-btn {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 16px; padding: 4px 8px; border-radius: 8px;
+  }
+  .icon-btn:hover { background: var(--panel-2); color: var(--text); }
+
+  #group-list { max-height: 480px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  #group-list::-webkit-scrollbar { width: 6px; }
+  #group-list::-webkit-scrollbar-thumb { background: var(--panel-2); border-radius: 3px; }
+  .group-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background .15s;
+  }
+  .group-item:hover { background: var(--panel-2); }
+  .group-item.selected { background: rgba(0,168,132,.12); border-color: var(--accent); }
+  .group-item .check {
+    width: 20px; height: 20px; flex: none;
+    border-radius: 6px;
+    border: 2px solid var(--muted);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; color: #06100d;
+    transition: all .15s;
+  }
+  .group-item .check::after { content: '✓'; opacity: 0; }
+  .group-item.selected .check { background: var(--accent); border-color: var(--accent); }
+  .group-item.selected .check::after { opacity: 1; }
+  .group-avatar {
+    width: 40px; height: 40px; flex: none;
+    border-radius: 50%;
+    background: var(--panel-2);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px;
+  }
+  .group-info { min-width: 0; }
+  .group-name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .group-meta { font-size: 12px; color: var(--muted); }
+  .empty { color: var(--muted); font-size: 13.5px; text-align: center; padding: 24px 0; }
+
+  #compose h3 span { color: var(--accent); }
+  textarea {
+    width: 100%;
+    min-height: 160px;
+    background: var(--panel-2);
+    border: 1px solid rgba(134,150,160,.15);
+    border-radius: 10px;
+    color: var(--text);
+    padding: 14px;
+    font-size: 14.5px;
+    font-family: inherit;
+    resize: vertical;
+    outline: none;
+  }
+  textarea:focus { border-color: var(--accent); }
+  .send-row { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
+  button.primary {
+    background: var(--accent);
+    color: #06100d;
+    border: none;
+    font-weight: 600;
+    font-size: 14.5px;
+    padding: 12px 28px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  button.primary:hover:not(:disabled) { background: var(--accent-dark); color: #fff; }
+  button.primary:disabled { opacity: .45; cursor: not-allowed; }
+  #feedback { font-size: 13.5px; }
+  #feedback.ok { color: var(--accent); }
+  #feedback.err { color: var(--danger); }
+  #fast-label {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--muted);
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  #fast-label input { accent-color: var(--accent); cursor: pointer; }
+  #results { margin-top: 12px; display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
+  .result-line { font-size: 12.5px; }
+  .result-line.ok { color: var(--accent); }
+  .result-line.err { color: var(--danger); }
+
+  #me-line { font-size: 12.5px; color: var(--muted); margin-top: 18px; display: flex; justify-content: space-between; align-items: center; }
+  #logout-btn {
+    background: none; border: 1px solid rgba(234,84,85,.4);
+    color: var(--danger); font-size: 12.5px;
+    padding: 5px 12px; border-radius: 8px; cursor: pointer;
+  }
+  #logout-btn:hover { background: rgba(234,84,85,.12); }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="logo">💬</span> Zapo Group Sender</h1>
+  <div class="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">Starting…</span></div>
+</header>
+
+<main>
+  <!-- QR / pairing screen -->
+  <div class="card" id="qr-screen">
+    <h2>Link your WhatsApp</h2>
+    <p id="qr-hint">Waiting for the server to generate a QR code…</p>
+    <div id="qr-box"><div class="spinner"></div></div>
+    <ol class="steps">
+      <li>Open <b>WhatsApp</b> on your phone</li>
+      <li>Tap <b>Settings → Linked devices</b></li>
+      <li>Tap <b>Link a device</b> and scan this QR code</li>
+    </ol>
+  </div>
+
+  <!-- Main app screen -->
+  <div id="app-screen">
+    <div class="card">
+      <div class="panel-title">
+        <h3>Groups in this session</h3>
+        <div style="display:flex; gap:4px;">
+          <button class="icon-btn" id="selectall-btn" title="Select all / clear">☑</button>
+          <button class="icon-btn" id="refresh-btn" title="Refresh groups">⟳</button>
+        </div>
+      </div>
+      <div id="group-list"><div class="empty">Loading groups…</div></div>
+    </div>
+
+    <div class="card" id="compose">
+      <div class="panel-title">
+        <h3>Send to: <span id="target-name">— select groups —</span></h3>
+      </div>
+      <textarea id="message-input" placeholder="Type your message…"></textarea>
+      <div class="send-row">
+        <button class="primary" id="send-btn" disabled>Send ➤</button>
+        <label id="fast-label"><input type="checkbox" id="fast-mode" checked> ⚡ Fast mode</label>
+        <span id="feedback"></span>
+      </div>
+      <div id="results"></div>
+      <div id="me-line">
+        <span id="me-jid"></span>
+        <button id="logout-btn">Log out</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id)
+const selectedJids = new Set()
+let groupsData = []
+let currentStatus = null
+
+function setStatus (status) {
+  const dot = $('status-dot'), txt = $('status-text')
+  dot.className = 'dot'
+  const map = {
+    starting:      ['Starting…', ''],
+    connecting:    ['Connecting…', 'waiting'],
+    waiting_qr:    ['Scan QR to pair', 'waiting'],
+    connected:     ['Connected', 'connected'],
+    disconnected:  ['Disconnected — retrying…', 'error'],
+    logged_out:    ['Logged out', 'error']
+  }
+  const [label, cls] = map[status] || [status, '']
+  txt.textContent = label
+  if (cls) dot.classList.add(cls)
+}
+
+function showScreen (connected) {
+  $('qr-screen').style.display = connected ? 'none' : 'block'
+  $('app-screen').style.display = connected ? 'grid' : 'none'
+}
+
+async function poll () {
+  try {
+    const s = await (await fetch('/api/status')).json()
+    setStatus(s.status)
+
+    if (s.status === 'connected') {
+      if (currentStatus !== 'connected') { // just connected
+        showScreen(true)
+        $('me-jid').textContent = s.me ? 'Linked as ' + s.me : ''
+        loadGroups()
+      }
+    } else {
+      showScreen(false)
+      if (s.qr) {
+        $('qr-box').innerHTML = '<img src="' + s.qr + '" alt="QR code">'
+        $('qr-hint').textContent = 'Scan this QR code with WhatsApp on your phone'
+      } else {
+        $('qr-box').innerHTML = '<div class="spinner"></div>'
+        $('qr-hint').textContent = s.lastError
+          ? 'Error: ' + s.lastError
+          : 'Waiting for the server to generate a QR code…'
+      }
+    }
+    currentStatus = s.status
+  } catch { /* server not up yet */ }
+}
+
+async function loadGroups (force) {
+  const list = $('group-list')
+  try {
+    const r = await fetch('/api/groups' + (force ? '?force=1' : ''))
+    const data = await r.json()
+    if (!r.ok) throw new Error(data.error)
+    groupsData = data.groups
+    // drop any previously-selected group that no longer exists in the session
+    for (const jid of [...selectedJids]) {
+      if (!groupsData.some(g => g.jid === jid)) selectedJids.delete(jid)
+    }
+    if (!groupsData.length) {
+      list.innerHTML = '<div class="empty">No groups found in this session.</div>'
+      updateSelectionUI()
+      return
+    }
+    list.innerHTML = ''
+    for (const g of groupsData) {
+      const el = document.createElement('div')
+      el.className = 'group-item' + (selectedJids.has(g.jid) ? ' selected' : '')
+      el.dataset.jid = g.jid
+      el.innerHTML =
+        '<div class="check"></div>' +
+        '<div class="group-avatar">👥</div>' +
+        '<div class="group-info">' +
+          '<div class="group-name"></div>' +
+          '<div class="group-meta">' + g.participants + ' members' +
+            (g.announce ? ' · admins-only' : '') + '</div>' +
+        '</div>'
+      el.querySelector('.group-name').textContent = g.subject || g.jid
+      el.onclick = () => toggleGroup(g.jid, el)
+      list.appendChild(el)
+    }
+    updateSelectionUI()
+  } catch (e) {
+    list.innerHTML = '<div class="empty">Failed to load groups: ' + e.message + '</div>'
+  }
+}
+
+function toggleGroup (jid, el) {
+  if (selectedJids.has(jid)) {
+    selectedJids.delete(jid)
+    el.classList.remove('selected')
+  } else {
+    selectedJids.add(jid)
+    el.classList.add('selected')
+  }
+  updateSelectionUI()
+}
+
+function toggleSelectAll () {
+  const allSelected = groupsData.length > 0 && selectedJids.size === groupsData.length
+  selectedJids.clear()
+  if (!allSelected) groupsData.forEach(g => selectedJids.add(g.jid))
+  document.querySelectorAll('.group-item').forEach(el => {
+    el.classList.toggle('selected', selectedJids.has(el.dataset.jid))
+  })
+  updateSelectionUI()
+}
+
+function updateSelectionUI () {
+  const n = selectedJids.size
+  $('target-name').textContent = n === 0
+    ? '— select groups —'
+    : n + (n === 1 ? ' group' : ' groups') + ' selected'
+  updateSendBtn()
+}
+
+function updateSendBtn () {
+  const n = selectedJids.size
+  $('send-btn').disabled = n === 0 || !$('message-input').value.trim()
+  $('send-btn').textContent = n > 1 ? 'Send to ' + n + ' ➤' : 'Send ➤'
+}
+
+function renderReport (data) {
+  const fb = $('feedback'), results = $('results')
+  fb.className = data.failed ? 'err' : 'ok'
+  fb.textContent = '✓ Sent to ' + data.sent + ' / ' + data.total + ' groups in ' + data.ms + 'ms'
+    + (data.failed ? ' · ' + data.failed + ' failed' : '')
+  results.innerHTML = ''
+  for (const item of data.report) {
+    const line = document.createElement('div')
+    line.className = 'result-line ' + (item.ok ? 'ok' : 'err')
+    line.textContent = (item.ok ? '✓ ' : '✗ ') + item.subject +
+      (item.ok ? ' (' + item.ms + 'ms)' : ' — ' + item.error)
+    results.appendChild(line)
+  }
+}
+
+let confirmTimer = null
+function confirmFastSend (tries) {
+  clearTimeout(confirmTimer)
+  fetch('/api/last-send').then(r => r.json()).then(data => {
+    if (data && data.report) renderReport(data)
+    else if (tries > 0) confirmTimer = setTimeout(() => confirmFastSend(tries - 1), 700)
+  }).catch(() => {})
+}
+
+async function sendMessage () {
+  const btn = $('send-btn'), fb = $('feedback'), results = $('results')
+  const message = $('message-input').value.trim()
+  if (selectedJids.size === 0 || !message) return
+  const jids = [...selectedJids]
+  const fast = $('fast-mode').checked
+  btn.disabled = true
+  btn.textContent = 'Sending to ' + jids.length + '…'
+  fb.textContent = ''
+  fb.className = ''
+  results.innerHTML = ''
+  try {
+    const r = await fetch('/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupJids: jids, message, fast })
+    })
+    const data = await r.json()
+    if (!r.ok) throw new Error(data.error)
+    if (data.fast) {
+      // dispatched instantly — delivery acks are confirmed in the background
+      fb.className = 'ok'
+      fb.textContent = '⚡ Dispatched to ' + data.total + ' groups in ' + data.ms + 'ms — confirming…'
+      $('message-input').value = ''
+      confirmFastSend(15)
+    } else {
+      renderReport(data)
+      if (!data.failed) $('message-input').value = ''
+    }
+  } catch (e) {
+    fb.className = 'err'
+    fb.textContent = '✗ ' + e.message
+  } finally {
+    updateSendBtn()
+  }
+}
+
+$('send-btn').onclick = sendMessage
+$('message-input').oninput = updateSendBtn
+$('message-input').onkeydown = e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendMessage()
+}
+$('refresh-btn').onclick = () => loadGroups(true)
+$('selectall-btn').onclick = toggleSelectAll
+$('logout-btn').onclick = async () => {
+  if (!confirm('Unlink this device and log out?')) return
+  await fetch('/api/logout', { method: 'POST' })
+  selectedJids.clear()
+  groupsData = []
+  $('target-name').textContent = '— select groups —'
+  $('results').innerHTML = ''
+}
+
+poll()
+setInterval(poll, 2500)
+</script>
+</body>
+</html>
