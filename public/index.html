@@ -132,9 +132,19 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 17px;
   }
-  .group-info { min-width: 0; }
+  .group-info { min-width: 0; flex: 1; }
   .group-name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .group-meta { font-size: 12px; color: var(--muted); }
+  .fav-btn {
+    background: none; border: none; flex: none;
+    font-size: 17px; line-height: 1;
+    color: var(--muted);
+    cursor: pointer; padding: 4px;
+    border-radius: 6px;
+    transition: color .15s, transform .15s;
+  }
+  .fav-btn:hover { transform: scale(1.25); color: #f5c518; }
+  .fav-btn.faved { color: #f5c518; }
   .empty { color: var(--muted); font-size: 13.5px; text-align: center; padding: 24px 0; }
 
   #compose h3 span { color: var(--accent); }
@@ -152,6 +162,41 @@
     outline: none;
   }
   textarea:focus { border-color: var(--accent); }
+  .attach-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  #attach-btn {
+    background: var(--panel-2);
+    border: 1px dashed rgba(134,150,160,.35);
+    color: var(--muted);
+    font-size: 13px;
+    padding: 8px 14px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }
+  #attach-btn:hover { color: var(--text); border-color: var(--accent); }
+  #media-preview {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel-2);
+    border: 1px solid rgba(134,150,160,.15);
+    border-radius: 10px;
+    padding: 6px 10px;
+    min-width: 0;
+  }
+  #media-preview img, #media-preview video {
+    width: 52px; height: 52px; flex: none;
+    object-fit: cover; border-radius: 8px;
+    background: #000;
+  }
+  #media-name {
+    font-size: 12.5px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 220px;
+  }
+  #media-remove {
+    background: none; border: none; color: var(--danger);
+    font-size: 14px; cursor: pointer; padding: 4px 6px; border-radius: 6px;
+  }
+  #media-remove:hover { background: rgba(234,84,85,.12); }
   .send-row { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
   button.primary {
     background: var(--accent);
@@ -214,6 +259,7 @@
       <div class="panel-title">
         <h3>Groups in this session</h3>
         <div style="display:flex; gap:4px;">
+          <button class="icon-btn" id="selectfavs-btn" title="Select favorite groups">★</button>
           <button class="icon-btn" id="selectall-btn" title="Select all / clear">☑</button>
           <button class="icon-btn" id="refresh-btn" title="Refresh groups">⟳</button>
         </div>
@@ -226,6 +272,16 @@
         <h3>Send to: <span id="target-name">— select groups —</span></h3>
       </div>
       <textarea id="message-input" placeholder="Type your message…"></textarea>
+      <div class="attach-row">
+        <button id="attach-btn" title="Attach an image or video">📎 Image / Video</button>
+        <input type="file" id="media-input" accept="image/*,video/*" hidden>
+        <div id="media-preview" hidden>
+          <img id="preview-img" alt="" hidden>
+          <video id="preview-video" muted hidden></video>
+          <span id="media-name"></span>
+          <button id="media-remove" title="Remove attachment">✕</button>
+        </div>
+      </div>
       <div class="send-row">
         <button class="primary" id="send-btn" disabled>Send ➤</button>
         <label id="fast-label"><input type="checkbox" id="fast-mode" checked> ⚡ Fast mode</label>
@@ -305,31 +361,62 @@ async function loadGroups (force) {
     for (const jid of [...selectedJids]) {
       if (!groupsData.some(g => g.jid === jid)) selectedJids.delete(jid)
     }
-    if (!groupsData.length) {
-      list.innerHTML = '<div class="empty">No groups found in this session.</div>'
-      updateSelectionUI()
-      return
-    }
-    list.innerHTML = ''
-    for (const g of groupsData) {
-      const el = document.createElement('div')
-      el.className = 'group-item' + (selectedJids.has(g.jid) ? ' selected' : '')
-      el.dataset.jid = g.jid
-      el.innerHTML =
-        '<div class="check"></div>' +
-        '<div class="group-avatar">👥</div>' +
-        '<div class="group-info">' +
-          '<div class="group-name"></div>' +
-          '<div class="group-meta">' + g.participants + ' members' +
-            (g.announce ? ' · admins-only' : '') + '</div>' +
-        '</div>'
-      el.querySelector('.group-name').textContent = g.subject || g.jid
-      el.onclick = () => toggleGroup(g.jid, el)
-      list.appendChild(el)
-    }
-    updateSelectionUI()
+    renderGroups()
   } catch (e) {
     list.innerHTML = '<div class="empty">Failed to load groups: ' + e.message + '</div>'
+  }
+}
+
+function renderGroups () {
+  const list = $('group-list')
+  if (!groupsData.length) {
+    list.innerHTML = '<div class="empty">No groups found in this session.</div>'
+    updateSelectionUI()
+    return
+  }
+  // favorites pinned on top (stable sort keeps the original order within each half)
+  groupsData.sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0))
+  list.innerHTML = ''
+  for (const g of groupsData) {
+    const el = document.createElement('div')
+    el.className = 'group-item' + (selectedJids.has(g.jid) ? ' selected' : '')
+    el.dataset.jid = g.jid
+    el.innerHTML =
+      '<div class="check"></div>' +
+      '<div class="group-avatar">👥</div>' +
+      '<div class="group-info">' +
+        '<div class="group-name"></div>' +
+        '<div class="group-meta">' + g.participants + ' members' +
+          (g.announce ? ' · admins-only' : '') + '</div>' +
+      '</div>' +
+      '<button class="fav-btn' + (g.favorite ? ' faved' : '') + '" title="' +
+        (g.favorite ? 'Remove from favorites' : 'Add to favorites') + '">' +
+        (g.favorite ? '★' : '☆') + '</button>'
+    el.querySelector('.group-name').textContent = g.subject || g.jid
+    el.onclick = () => toggleGroup(g.jid, el)
+    el.querySelector('.fav-btn').onclick = (e) => {
+      e.stopPropagation() // don't toggle the selection
+      toggleFavorite(g)
+    }
+    list.appendChild(el)
+  }
+  updateSelectionUI()
+}
+
+async function toggleFavorite (g) {
+  const fav = !g.favorite
+  g.favorite = fav
+  renderGroups() // optimistic — re-render immediately, revert on failure
+  try {
+    const r = await fetch('/api/favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jid: g.jid, favorite: fav })
+    })
+    if (!r.ok) throw new Error()
+  } catch {
+    g.favorite = !fav
+    renderGroups()
   }
 }
 
@@ -354,6 +441,17 @@ function toggleSelectAll () {
   updateSelectionUI()
 }
 
+function selectFavorites () {
+  const favs = groupsData.filter(g => g.favorite)
+  if (!favs.length) return
+  selectedJids.clear()
+  favs.forEach(g => selectedJids.add(g.jid))
+  document.querySelectorAll('.group-item').forEach(el => {
+    el.classList.toggle('selected', selectedJids.has(el.dataset.jid))
+  })
+  updateSelectionUI()
+}
+
 function updateSelectionUI () {
   const n = selectedJids.size
   $('target-name').textContent = n === 0
@@ -364,9 +462,55 @@ function updateSelectionUI () {
 
 function updateSendBtn () {
   const n = selectedJids.size
-  $('send-btn').disabled = n === 0 || !$('message-input').value.trim()
+  $('send-btn').disabled = n === 0 || (!$('message-input').value.trim() && !mediaFile)
   $('send-btn').textContent = n > 1 ? 'Send to ' + n + ' ➤' : 'Send ➤'
 }
+
+// ---- media attachment ----
+let mediaFile = null
+let mediaPreviewUrl = null
+
+function setAttachment (file) {
+  const fb = $('feedback')
+  if (file) {
+    if (!/^(image|video)\//.test(file.type)) {
+      fb.className = 'err'
+      fb.textContent = '✗ Only images and videos are supported'
+      return
+    }
+    if (file.type === 'image/gif') {
+      fb.className = 'err'
+      fb.textContent = '✗ GIFs are not supported — convert to MP4 video first'
+      return
+    }
+    if (file.size > 100 * 1024 * 1024) {
+      fb.className = 'err'
+      fb.textContent = '✗ File is too large (max 100 MB)'
+      return
+    }
+  }
+  if (mediaPreviewUrl) { URL.revokeObjectURL(mediaPreviewUrl); mediaPreviewUrl = null }
+  mediaFile = file || null
+  const img = $('preview-img'), vid = $('preview-video')
+  img.hidden = true; img.removeAttribute('src')
+  vid.hidden = true; vid.removeAttribute('src')
+  if (mediaFile) {
+    mediaPreviewUrl = URL.createObjectURL(mediaFile)
+    if (mediaFile.type.startsWith('image/')) { img.src = mediaPreviewUrl; img.hidden = false }
+    else { vid.src = mediaPreviewUrl; vid.hidden = false }
+    $('media-name').textContent = mediaFile.name + ' · ' + (mediaFile.size / 1024 / 1024).toFixed(1) + ' MB'
+    $('media-preview').hidden = false
+    $('attach-btn').hidden = true
+  } else {
+    $('media-preview').hidden = true
+    $('attach-btn').hidden = false
+  }
+  updateSendBtn()
+}
+
+$('attach-btn').onclick = () => $('media-input').click()
+$('media-input').onchange = () => setAttachment($('media-input').files[0])
+$('media-remove').onclick = () => { $('media-input').value = ''; setAttachment(null) }
 
 function renderReport (data) {
   const fb = $('feedback'), results = $('results')
@@ -397,20 +541,31 @@ function confirmFastSend (tries) {
 async function sendMessage () {
   const btn = $('send-btn'), fb = $('feedback'), results = $('results')
   const message = $('message-input').value.trim()
-  if (selectedJids.size === 0 || !message) return
+  if (selectedJids.size === 0 || (!message && !mediaFile)) return
   const jids = [...selectedJids]
   const fast = $('fast-mode').checked
   btn.disabled = true
-  btn.textContent = 'Sending to ' + jids.length + '…'
+  btn.textContent = mediaFile ? 'Uploading…' : 'Sending to ' + jids.length + '…'
   fb.textContent = ''
   fb.className = ''
   results.innerHTML = ''
   try {
-    const r = await fetch('/api/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ groupJids: jids, message, fast })
-    })
+    let r
+    if (mediaFile) {
+      // media goes as multipart — the server stages it and fans out per group
+      const fd = new FormData()
+      fd.append('groupJids', JSON.stringify(jids))
+      fd.append('message', message)
+      fd.append('fast', fast)
+      fd.append('media', mediaFile)
+      r = await fetch('/api/send', { method: 'POST', body: fd })
+    } else {
+      r = await fetch('/api/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ groupJids: jids, message, fast })
+      })
+    }
     const data = await r.json()
     if (!r.ok) throw new Error(data.error)
     if (data.fast) {
@@ -418,10 +573,14 @@ async function sendMessage () {
       fb.className = 'ok'
       fb.textContent = '⚡ Sending ' + data.total + ' groups in batches of ' + (data.batchSize || 5) + ' — confirming…'
       $('message-input').value = ''
+      setAttachment(null)
       confirmFastSend(90)
     } else {
       renderReport(data)
-      if (!data.failed) $('message-input').value = ''
+      if (!data.failed) {
+        $('message-input').value = ''
+        setAttachment(null)
+      }
     }
   } catch (e) {
     fb.className = 'err'
@@ -438,13 +597,23 @@ $('message-input').onkeydown = e => {
 }
 $('refresh-btn').onclick = () => loadGroups(true)
 $('selectall-btn').onclick = toggleSelectAll
+$('selectfavs-btn').onclick = selectFavorites
 $('logout-btn').onclick = async () => {
   if (!confirm('Unlink this device and log out?')) return
-  await fetch('/api/logout', { method: 'POST' })
+  const btn = $('logout-btn')
+  btn.disabled = true
+  btn.textContent = 'Logging out…'
+  try {
+    await fetch('/api/logout', { method: 'POST' })
+  } finally {
+    btn.disabled = false
+    btn.textContent = 'Log out'
+  }
   selectedJids.clear()
   groupsData = []
   $('target-name').textContent = '— select groups —'
   $('results').innerHTML = ''
+  poll() // flip to the QR screen right away instead of waiting for the next tick
 }
 
 poll()

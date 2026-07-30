@@ -8,10 +8,16 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@zapo-js/media-utils": "^1.0.0",
     "@zapo-js/store-sqlite": "^1.0.0",
     "better-sqlite3": "^11.10.0",
     "express": "^4.21.2",
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0",
+    "file-type": "^22.0.1",
+    "multer": "^2.2.0",
     "qrcode": "^1.5.4",
+    "sharp": "^0.35.3",
     "zapo-js": "1.6.2"
   }
 }

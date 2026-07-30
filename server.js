@@ -1,10 +1,16 @@
 import express from 'express'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import multer from 'multer'
 import QRCode from 'qrcode'
+import { fileTypeFromFile } from 'file-type'
 import { ConsoleLogger, createStore, WaClient } from 'zapo-js'
 import { createSqliteStore } from '@zapo-js/store-sqlite'
+import { createMediaProcessor } from '@zapo-js/media-utils'
+import ffmpegPath from 'ffmpeg-static'
+import ffprobeStatic from 'ffprobe-static'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 3500
@@ -20,6 +26,8 @@ const state = {
 }
 
 let client = null
+let store = null              // sqlite-backed store of the current client (destroyed on rebuild/logout)
+let resetting = null          // in-flight hard reset, deduped so logout + close-handler don't race
 let groupsCache = []          // last known groups of the session
 let groupsCacheAt = 0
 let lastSendReport = null     // ack report of the most recent send (fast mode confirms via this)
@@ -29,12 +37,20 @@ const GROUPS_TTL_MS = 60_000  // refresh group list at most once per minute
 const SEND_BATCH_SIZE = 5        // groups sent in parallel per batch
 const SEND_BATCH_DELAY_MS = 100  // pause between batches (0.1s), applies to all modes
 
+// Media processor — sharp for image thumbnails, vendored ffmpeg/ffprobe for video
+// thumbnails + duration/dimension probing. Defaults match the official WhatsApp
+// clients (JPEG thumb, WA-standard max edge). Shared across client rebuilds.
+const mediaProcessor = createMediaProcessor({
+  ffmpegPath,
+  ffprobePath: ffprobeStatic.path
+})
+
 // ---------------------------------------------------------------------------
 // zapo-js client
 // ---------------------------------------------------------------------------
 function buildClient () {
   fs.mkdirSync(path.join(__dirname, '.auth'), { recursive: true })
-  const store = createStore({
+  store = createStore({
     backends: {
       sqlite: createSqliteStore({ path: '.auth/state.sqlite' })
     },
@@ -53,7 +69,12 @@ function buildClient () {
     }
   })
 
-  const c = new WaClient({ store, sessionId: 'default' }, new ConsoleLogger('info'))
+  const c = new WaClient({
+    store,
+    sessionId: 'default',
+    // auto-generate WA-standard thumbnails + probe duration/dimensions on outgoing media
+    media: { processor: mediaProcessor, generateThumbnail: true, generateProbe: true }
+  }, new ConsoleLogger('info'))
 
   c.on('auth_qr', async ({ qr }) => {
     if (c !== client) return // stale instance replaced by a newer one
@@ -82,11 +103,9 @@ function buildClient () {
     } else {
       console.log('[zapo] connection closed:', event.reason, 'logout?', event.isLogout)
       if (event.isLogout) {
-        // device removed (UI logout or unlinked from the phone) — restart pairing for a new QR
-        state.status = 'logged_out'
-        state.me = null
-        groupsCache = []
-        scheduleReconnect(1500)
+        // device removed (UI logout or unlinked from the phone) — wipe the session
+        // completely and restart pairing so a fresh QR appears
+        hardResetSession().catch(() => {})
       } else {
         state.status = 'disconnected'
         // zapo does not auto-reconnect by design — rebuild and reconnect
@@ -115,13 +134,53 @@ async function startClient () {
   starting = true
   try {
     state.status = 'connecting'
-    const old = client
-    if (old) { try { await old.disconnect() } catch {} } // make sure a stale socket is dead
+    const oldClient = client
+    const oldStore = store
+    client = null
+    store = null
+    if (oldClient) { try { await oldClient.disconnect() } catch {} } // make sure a stale socket is dead
+    if (oldStore) { try { await oldStore.destroy() } catch {} }      // release the sqlite handle before reopening
     client = buildClient()
     await client.connect()
   } finally {
     starting = false
   }
+}
+
+// Delete the persisted session (.auth/state.sqlite + -wal/-shm). The store must be
+// destroyed first or Windows keeps the file locked — hence the retries.
+function wipeSessionFiles () {
+  try {
+    fs.rmSync(path.join(__dirname, '.auth'), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+    console.log('[zapo] session files deleted')
+  } catch (err) {
+    console.warn('[zapo] could not delete session files:', String(err?.message || err))
+  }
+}
+
+// Full teardown: disconnect the client, close the sqlite store, delete the session
+// files, then restart pairing. Deduped — the logout route and the isLogout close
+// handler can both call this without racing each other.
+function hardResetSession () {
+  if (resetting) return resetting
+  resetting = (async () => {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+    const c = client
+    const s = store
+    client = null // detach first so stale event handlers become no-ops
+    store = null
+    if (c) { try { await c.disconnect() } catch {} }
+    if (s) { try { await s.destroy() } catch {} }
+    wipeSessionFiles()
+    state.status = 'logged_out'
+    state.me = null
+    state.qrDataUrl = null
+    state.lastError = null
+    groupsCache = []
+    lastSendReport = null
+    scheduleReconnect(1000) // fresh pairing cycle → new QR
+  })().finally(() => { resetting = null })
+  return resetting
 }
 
 // ---------------------------------------------------------------------------
@@ -143,11 +202,35 @@ async function refreshGroups (force = false) {
 }
 
 // ---------------------------------------------------------------------------
+// Favorite groups — persisted in favorites.json (NOT inside .auth, so they
+// survive logout / session wipes and re-pairing)
+// ---------------------------------------------------------------------------
+const FAVORITES_FILE = path.join(__dirname, 'favorites.json')
+let favorites = new Set()
+try {
+  favorites = new Set(JSON.parse(fs.readFileSync(FAVORITES_FILE, 'utf8')))
+} catch {} // first run — no file yet
+
+function saveFavorites () {
+  try {
+    fs.writeFileSync(FAVORITES_FILE, JSON.stringify([...favorites], null, 2))
+  } catch (err) {
+    console.warn('[favorites] save failed:', String(err?.message || err))
+  }
+}
+
+// ---------------------------------------------------------------------------
 // HTTP API
 // ---------------------------------------------------------------------------
 const app = express()
 app.use(express.json())
 app.use(express.static(path.join(__dirname, 'public')))
+
+// Media uploads staged to a temp dir (multer creates it), deleted after the send
+const upload = multer({
+  dest: path.join(os.tmpdir(), 'zapo-api-uploads'),
+  limits: { fileSize: 100 * 1024 * 1024 } // 100 MB cap
+})
 
 // Connection / pairing status + QR for the UI to poll
 app.get('/api/status', (req, res) => {
@@ -166,31 +249,79 @@ app.get('/api/groups', async (req, res) => {
   }
   try {
     const groups = await refreshGroups(req.query.force === '1')
-    res.json({ groups })
+    // Merge the favorite flag at response time so starring never needs a group refresh.
+    // Favorites first; sort is stable so the original order is kept within each half.
+    const merged = groups
+      .map(g => ({ ...g, favorite: favorites.has(g.jid) }))
+      .sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0))
+    res.json({ groups: merged })
   } catch (err) {
     res.status(500).json({ error: String(err?.message || err) })
   }
 })
 
-// Send a text message — ONLY to groups that exist in the session (parallel fan-out)
-app.post('/api/send', async (req, res) => {
-  const { groupJids, groupJid, message, fast } = req.body || {}
+// Mark / unmark a group as favorite
+app.post('/api/favorites', (req, res) => {
+  const { jid, favorite } = req.body || {}
+  if (typeof jid !== 'string' || !jid.endsWith('@g.us')) {
+    return res.status(400).json({ error: 'jid must be a group JID ending in @g.us' })
+  }
+  if (favorite) favorites.add(jid)
+  else favorites.delete(jid)
+  saveFavorites()
+  res.json({ ok: true, favorite: !!favorite })
+})
+
+// Send a text or media (image/video) message — ONLY to groups that exist in the
+// session (parallel fan-out). Media arrives as multipart/form-data in the `media`
+// field; thumbnails are generated automatically by the client's media processor.
+app.post('/api/send', upload.single('media'), async (req, res) => {
+  let { groupJids, groupJid, message, fast } = req.body || {}
+  // multipart fields arrive as strings — normalize both transports
+  if (typeof groupJids === 'string') {
+    try { groupJids = JSON.parse(groupJids) } catch { groupJids = [] }
+  }
+  fast = fast === true || fast === 'true'
+  const uploadPath = req.file?.path || null
+  const discardUpload = () => { if (uploadPath) fs.promises.unlink(uploadPath).catch(() => {}) }
+
   if (state.status !== 'connected') {
+    discardUpload()
     return res.status(409).json({ error: 'Session is not connected yet' })
   }
   // Accept an array of JIDs, or a single one (backward compatible), de-duplicated
   const targets = Array.isArray(groupJids) ? groupJids : (groupJid ? [groupJid] : [])
   const jids = [...new Set(targets)]
   if (!jids.length) {
+    discardUpload()
     return res.status(400).json({ error: 'Select at least one group' })
   }
   if (jids.some(j => typeof j !== 'string' || !j.endsWith('@g.us'))) {
+    discardUpload()
     return res.status(400).json({ error: 'Every target must be a group JID ending in @g.us' })
   }
-  if (typeof message !== 'string' || !message.trim()) {
-    return res.status(400).json({ error: 'message is required' })
+  const text = typeof message === 'string' ? message.trim() : ''
+  if (!text && !req.file) {
+    return res.status(400).json({ error: 'Type a message or attach an image/video' })
   }
-  const text = message.trim()
+
+  // Classify the attachment by magic bytes (never trust the client mimetype alone)
+  let media = null // { kind: 'image'|'video', mime }
+  if (req.file) {
+    const ft = await fileTypeFromFile(uploadPath).catch(() => null)
+    const mime = ft?.mime || req.file.mimetype || ''
+    if (mime === 'image/gif') {
+      discardUpload()
+      return res.status(400).json({ error: 'GIFs are not supported — convert to MP4 video first' })
+    }
+    const kind = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : null
+    if (!kind) {
+      discardUpload()
+      return res.status(400).json({ error: 'Only images and videos are supported (got ' + (mime || 'unknown') + ')' })
+    }
+    media = { kind, mime }
+  }
+
   try {
     // Validate against the warm in-memory group set (refreshed on connect + via the UI).
     // Only touch the network if we have never loaded groups — never block a send otherwise.
@@ -204,12 +335,17 @@ app.post('/api/send', async (req, res) => {
     const startedAt = Date.now()
 
     // linkPreview:false avoids a blocking URL-metadata fetch when a message contains a link.
+    // Media sends pass the staged temp file path — zapo streams it, generates the
+    // WA-standard thumbnail via the media processor, encrypts and uploads per group.
     const sendOne = async (jid) => {
       if (!known.has(jid)) throw new Error('Not available in the current session')
       const t0 = Date.now()
+      const content = media
+        ? { type: media.kind, media: uploadPath, mimetype: media.mime, ...(text ? { caption: text } : {}) }
+        : { type: 'text', text, linkPreview: false }
       for (let attempt = 0; ; attempt += 1) {
         try {
-          const result = await client.message.send(jid, { type: 'text', text, linkPreview: false })
+          const result = await client.message.send(jid, content)
           return { result, ms: Date.now() - t0, retried: attempt > 0 }
         } catch (err) {
           if (attempt >= 3 || !RETRYABLE_SEND_ERROR.test(String(err?.message || err))) throw err
@@ -235,6 +371,7 @@ app.post('/api/send', async (req, res) => {
     }
 
     const finalize = (settled) => {
+      discardUpload() // all batches settled — the staged temp file is no longer needed
       const report = settled.map((r, i) => {
         const jid = jids[i]
         const subject = nameOf.get(jid) || jid
@@ -258,7 +395,7 @@ app.post('/api/send', async (req, res) => {
       // ⚡ Fast mode: reply instantly, then run the batches in the background.
       lastSendReport = null
       res.json({ ok: true, fast: true, total: jids.length, batchSize: SEND_BATCH_SIZE, ms: Date.now() - startedAt })
-      runBatched().then(finalize).catch(() => {})
+      runBatched().then(finalize).catch(() => { discardUpload() })
       return
     }
 
@@ -266,6 +403,7 @@ app.post('/api/send', async (req, res) => {
     const { sent, failed, total, ms, report } = finalize(settled)
     res.json({ ok: sent > 0, sent, failed, total, ms, report })
   } catch (err) {
+    discardUpload()
     res.status(500).json({ error: String(err?.message || err) })
   }
 })
@@ -275,26 +413,30 @@ app.get('/api/last-send', (req, res) => {
   res.json(lastSendReport || { pending: true })
 })
 
-// Unlink the device and clear the session
+// JSON error responses for middleware failures (e.g. multer's 100 MB file cap)
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err)
+  res.status(err.statusCode || 500).json({ error: String(err?.message || err) })
+})
+
+// Unlink the device and delete the session
 app.post('/api/logout', async (req, res) => {
   try {
-    if (client) {
-      try {
-        await client.logout()
-      } catch (err) {
+    const c = client
+    if (c) {
+      // Best-effort server-side unpair. Never let it hang the request: if the socket
+      // is half-dead the IQ can stall, and the local wipe below works regardless.
+      const unpair = c.logout().catch(err => {
         // teardown noise is expected: the server kills the stream the moment the device
         // is removed, so in-flight queries fail with 'client is not connected'
         console.warn('[zapo] logout finished with teardown noise:', String(err?.message || err))
-      }
+      })
+      await Promise.race([unpair, new Promise(resolve => setTimeout(resolve, 10_000))])
     }
-    state.status = 'logged_out'
-    state.me = null
-    state.qrDataUrl = null
-    groupsCache = []
-    lastSendReport = null
+    // Local teardown + session file deletion always runs, even if unpair failed —
+    // this is what guarantees a clean slate and a fresh QR.
+    await hardResetSession()
     res.json({ ok: true })
-    // fresh pairing cycle so a new QR appears (deduped with the closed-handler restart)
-    scheduleReconnect(1500)
   } catch (err) {
     res.status(500).json({ error: String(err?.message || err) })
   }
@@ -316,10 +458,11 @@ startClient().catch(err => {
   console.error('[zapo] failed to connect:', err)
 })
 
-// Graceful shutdown — flush the write-behind store
+// Graceful shutdown — flush the write-behind store and close the sqlite handle
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     try { if (client) await client.disconnect() } catch {}
+    try { if (store) await store.destroy() } catch {}
     process.exit(0)
   })
 }
