@@ -87,7 +87,10 @@ function buildClient () {
     store,
     sessionId: 'default',
     // auto-generate WA-standard thumbnails + probe duration/dimensions on outgoing media
-    media: { processor: mediaProcessor, generateThumbnail: true, generateProbe: true }
+    media: { processor: mediaProcessor, generateThumbnail: true, generateProbe: true },
+    // we don't persist the mailbox (messages/threads/contacts = 'none') — skip the
+    // large initial history download entirely (per the official production guide)
+    history: { enabled: false }
   }, new ConsoleLogger('info'))
 
   c.on('auth_qr', async ({ qr }) => {
@@ -386,6 +389,10 @@ app.post('/api/send', upload.single('media'), async (req, res) => {
         ? {
             videoMessage: {
               ...common,
+              // streaming sidecar + metadata URL enable seekable playback on recipients —
+              // the internal builder sets both, so the pre-upload path must too
+              ...(uploaded.streamingSidecar ? { streamingSidecar: uploaded.streamingSidecar } : {}),
+              ...(uploaded.metadataUrl ? { metadataUrl: uploaded.metadataUrl } : {}),
               ...(probe?.durationSeconds !== undefined ? { seconds: Math.floor(probe.durationSeconds) } : {}),
               ...(probe?.width !== undefined ? { width: probe.width } : {}),
               ...(probe?.height !== undefined ? { height: probe.height } : {})
