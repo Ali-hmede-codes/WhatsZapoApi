@@ -52,7 +52,11 @@ function buildClient () {
   fs.mkdirSync(path.join(__dirname, '.auth'), { recursive: true })
   store = createStore({
     backends: {
-      sqlite: createSqliteStore({ path: '.auth/state.sqlite' })
+      sqlite: createSqliteStore({
+        path: '.auth/state.sqlite',
+        // keep device lists / group metadata warm for 1h — push events update them in between
+        cacheTtlMs: { deviceListMs: 3_600_000, groupMetadataMs: 3_600_000 }
+      })
     },
     providers: {
       auth: 'sqlite',
@@ -66,7 +70,17 @@ function buildClient () {
       messages: 'none',
       threads: 'none',
       contacts: 'none'
-    }
+    },
+    // Persist the hot fan-out caches. Memory-only (the default) means every server
+    // restart pays a usync round-trip per participant + a rate-limited metadata IQ
+    // on the FIRST send — this is what makes the first send slow.
+    cacheProviders: {
+      deviceList: 'sqlite',
+      groupMetadata: 'sqlite'
+    },
+    // In-process LRU in front of sqlite for the per-message crypto reads (safe:
+    // this process is the only writer for this sessionId).
+    cacheLayer: { session: true, identity: true, senderKey: true, privacyToken: true }
   })
 
   const c = new WaClient({
@@ -334,15 +348,54 @@ app.post('/api/send', upload.single('media'), async (req, res) => {
     const RETRYABLE_SEND_ERROR = /not connected/i
     const startedAt = Date.now()
 
+    // Pre-process + pre-upload media ONCE and reuse the descriptor for every group.
+    // Without this every group send re-runs sharp/ffmpeg and re-encrypts + re-uploads
+    // the whole file to the CDN (N full uploads for N groups). Thumbnail edge (100px)
+    // and proto shape mirror the library's own media builder exactly.
+    let mediaProto = null
+    if (media) {
+      const isVideo = media.kind === 'video'
+      const [uploaded, thumb, probe] = await Promise.all([
+        client.message.upload(uploadPath, { type: media.kind, mimetype: media.mime }),
+        isVideo
+          ? mediaProcessor.generateVideoThumbnail?.(uploadPath, 100).catch(() => null)
+          : mediaProcessor.generateImageThumbnail?.(uploadPath, 100).catch(() => null),
+        isVideo ? mediaProcessor.probeMedia?.(uploadPath).catch(() => null) : null
+      ])
+      const common = {
+        url: uploaded.url,
+        directPath: uploaded.directPath,
+        mediaKey: uploaded.mediaKey,
+        fileSha256: uploaded.fileSha256,
+        fileEncSha256: uploaded.fileEncSha256,
+        fileLength: uploaded.fileLength,
+        mediaKeyTimestamp: uploaded.mediaKeyTimestamp,
+        mimetype: media.mime,
+        ...(text ? { caption: text } : {}),
+        ...(thumb ? { jpegThumbnail: thumb.jpegThumbnail } : {})
+      }
+      mediaProto = isVideo
+        ? {
+            videoMessage: {
+              ...common,
+              ...(probe?.durationSeconds !== undefined ? { seconds: Math.floor(probe.durationSeconds) } : {}),
+              ...(probe?.width !== undefined ? { width: probe.width } : {}),
+              ...(probe?.height !== undefined ? { height: probe.height } : {})
+            }
+          }
+        : {
+            imageMessage: {
+              ...common,
+              ...(thumb ? { width: thumb.width, height: thumb.height } : {})
+            }
+          }
+    }
+
     // linkPreview:false avoids a blocking URL-metadata fetch when a message contains a link.
-    // Media sends pass the staged temp file path — zapo streams it, generates the
-    // WA-standard thumbnail via the media processor, encrypts and uploads per group.
     const sendOne = async (jid) => {
       if (!known.has(jid)) throw new Error('Not available in the current session')
       const t0 = Date.now()
-      const content = media
-        ? { type: media.kind, media: uploadPath, mimetype: media.mime, ...(text ? { caption: text } : {}) }
-        : { type: 'text', text, linkPreview: false }
+      const content = mediaProto ?? { type: 'text', text, linkPreview: false }
       for (let attempt = 0; ; attempt += 1) {
         try {
           const result = await client.message.send(jid, content)
