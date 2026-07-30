@@ -203,15 +203,23 @@ function hardResetSession () {
 async function refreshGroups (force = false) {
   if (!client || state.status !== 'connected') return groupsCache
   if (!force && Date.now() - groupsCacheAt < GROUPS_TTL_MS) return groupsCache
-  const groups = await client.group.queryAllGroups()
-  groupsCache = groups.map(g => ({
-    jid: g.jid,
-    subject: g.subject,
-    participants: g.participants?.length ?? 0,
-    announce: !!g.announce
-  }))
-  groupsCacheAt = Date.now()
-  console.log(`[zapo] session has ${groupsCache.length} groups`)
+  try {
+    const groups = await client.group.queryAllGroups()
+    groupsCache = groups.map(g => ({
+      jid: g.jid,
+      subject: g.subject,
+      participants: g.participants?.length ?? 0,
+      announce: !!g.announce
+    }))
+    groupsCacheAt = Date.now()
+    console.log(`[zapo] session has ${groupsCache.length} groups`)
+  } catch (err) {
+    // Transient socket death (keepalive resume, reconnect in flight) kills in-flight
+    // queries — serve the last known list instead of erroring; the connection-open
+    // handler force-refreshes right after the reconnect lands.
+    if (!groupsCache.length) throw err
+    console.warn('[zapo] group refresh failed, serving cached list:', String(err?.message || err))
+  }
   return groupsCache
 }
 

@@ -350,8 +350,10 @@ async function poll () {
   } catch { /* server not up yet */ }
 }
 
+let groupsRetryTimer = null
 async function loadGroups (force) {
   const list = $('group-list')
+  clearTimeout(groupsRetryTimer)
   try {
     const r = await fetch('/api/groups' + (force ? '?force=1' : ''))
     const data = await r.json()
@@ -363,7 +365,14 @@ async function loadGroups (force) {
     }
     renderGroups()
   } catch (e) {
-    list.innerHTML = '<div class="empty">Failed to load groups: ' + e.message + '</div>'
+    // transient blip (keepalive reconnect) — keep the current list and retry;
+    // only show the error when there is nothing to keep on screen
+    if (!groupsData.length) {
+      list.innerHTML = '<div class="empty">Failed to load groups: ' + e.message + '<br>Retrying…</div>'
+    }
+    groupsRetryTimer = setTimeout(() => {
+      if (currentStatus === 'connected') loadGroups(force)
+    }, 3000)
   }
 }
 
